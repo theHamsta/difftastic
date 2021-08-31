@@ -43,7 +43,8 @@ impl<'a> fmt::Debug for ChangeKind<'a> {
 pub struct SyntaxInfo<'a> {
     // TODO: Make these fields private.
     pub pos_content_hash: u64,
-    pub next: Cell<Option<&'a Syntax<'a>>>,
+    pub parent: Cell<Option<&'a Syntax<'a>>>,
+    pub next_sibling: Cell<Option<&'a Syntax<'a>>>,
     pub prev: Cell<Option<&'a Syntax<'a>>>,
     pub change: Cell<Option<ChangeKind<'a>>>,
     pub num_ancestors: Cell<u64>,
@@ -54,7 +55,8 @@ impl<'a> SyntaxInfo<'a> {
     pub fn new(pos_content_hash: u64) -> Self {
         Self {
             pos_content_hash,
-            next: Cell::new(None),
+            parent: Cell::new(None),
+            next_sibling: Cell::new(None),
             prev: Cell::new(None),
             change: Cell::new(None),
             num_ancestors: Cell::new(0),
@@ -114,13 +116,6 @@ impl<'a> fmt::Debug for Syntax<'a> {
 
                 if env::var("DFT_VERBOSE").is_ok() {
                     ds.field("change", &info.change.get());
-
-                    let next_s = match info.next.get() {
-                        Some(List { .. }) => "Some(List)",
-                        Some(Atom { .. }) => "Some(Atom)",
-                        None => "None",
-                    };
-                    ds.field("next", &next_s);
                 }
 
                 ds.finish()
@@ -137,12 +132,6 @@ impl<'a> fmt::Debug for Syntax<'a> {
 
                 if env::var("DFT_VERBOSE").is_ok() {
                     ds.field("change", &info.change.get());
-                    let next_s = match info.next.get() {
-                        Some(List { .. }) => "Some(List)",
-                        Some(Atom { .. }) => "Some(Atom)",
-                        None => "None",
-                    };
-                    ds.field("next", &next_s);
                 }
 
                 ds.finish()
@@ -269,8 +258,12 @@ impl<'a> Syntax<'a> {
         }
     }
 
-    pub fn next(&self) -> Option<&'a Syntax<'a>> {
-        self.info().next.get()
+    pub fn next_sibling(&self) -> Option<&'a Syntax<'a>> {
+        self.info().next_sibling.get()
+    }
+
+    pub fn parent(&self) -> Option<&'a Syntax<'a>> {
+        self.info().parent.get()
     }
 
     pub fn prev_is_contiguous(&self) -> bool {
@@ -454,7 +447,7 @@ pub fn init_info<'a>(lhs_roots: &[&'a Syntax<'a>], rhs_roots: &[&'a Syntax<'a>])
 /// Return the next unique ID available, so we can ensure LHS and RHS
 /// have different IDs.
 pub fn init_info_single<'a>(roots: &[&'a Syntax<'a>], first_id: u64) -> u64 {
-    set_next(roots, None);
+    set_next_sibling(roots);
     set_prev(roots, None);
     set_num_ancestors(roots, 0);
     set_unique_id(roots, first_id)
@@ -472,18 +465,23 @@ fn set_unique_id<'a>(nodes: &[&'a Syntax<'a>], prev_id: u64) -> u64 {
     id
 }
 
-/// For every syntax node in the tree, mark the next node according to
-/// a preorder traversal.
-fn set_next<'a>(nodes: &[&'a Syntax<'a>], parent_next: Option<&'a Syntax<'a>>) {
-    for (i, node) in nodes.iter().enumerate() {
-        let node_next = match nodes.get(i + 1) {
-            Some(node_next) => Some(*node_next),
-            None => parent_next,
-        };
-
-        node.info().next.set(node_next);
+/// For every syntax node in the tree, mark the parent node.
+fn set_parent<'a>(nodes: &[&'a Syntax<'a>], parent: Option<&'a Syntax<'a>>) {
+    for node in nodes.iter() {
+        node.info().parent.set(parent);
         if let List { children, .. } = node {
-            set_next(children, node_next);
+            set_parent(children, Some(node));
+        }
+    }
+}
+
+/// For every syntax node in the tree, mark the next sibling node.
+fn set_next_sibling<'a>(nodes: &[&'a Syntax<'a>]) {
+    for (i, node) in nodes.iter().enumerate() {
+        let next_sibling = nodes.get(i + 1).copied();
+        node.info().next_sibling.set(next_sibling);
+        if let List { children, .. } = node {
+            set_next_sibling(children);
         }
     }
 }

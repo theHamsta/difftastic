@@ -40,6 +40,8 @@ use Edge::*;
 /// ```
 #[derive(Debug, Clone)]
 struct Vertex<'a> {
+    lhs_parents: Vec<(&'a Syntax<'a>, EnterKind)>,
+    rhs_parents: Vec<(&'a Syntax<'a>, EnterKind)>,
     lhs_syntax: Option<&'a Syntax<'a>>,
     rhs_syntax: Option<&'a Syntax<'a>>,
     /// If the previous edge was marking syntax as novel, what line
@@ -59,23 +61,55 @@ struct Vertex<'a> {
     rhs_prev_is_novel: bool,
 }
 impl<'a> PartialEq for Vertex<'a> {
+    /// Two Vertex values are equal if they're pointing at the same
+    /// syntax node.
+    ///
+    /// If we've handled all the nodes at this level, then we need to
+    /// compare parent nodes to avoid confusion with reaching the end
+    /// of a different level.
     fn eq(&self, other: &Self) -> bool {
-        self.lhs_syntax.map(|node| node.id()) == other.lhs_syntax.map(|node| node.id())
-            && self.rhs_syntax.map(|node| node.id()) == other.rhs_syntax.map(|node| node.id())
+        if self.lhs_syntax.map(|node| node.id()) != other.lhs_syntax.map(|node| node.id())
+            || self.rhs_syntax.map(|node| node.id()) != other.rhs_syntax.map(|node| node.id())
+        {
+            return false;
+        }
+
+        fn ids_and_kinds(nodes: &[(&Syntax, EnterKind)]) -> Vec<(u64, EnterKind)> {
+            nodes
+                .iter()
+                .map(|(node, kind)| (node.id(), *kind))
+                .collect()
+        }
+
+        ids_and_kinds(&self.lhs_parents) == ids_and_kinds(&other.lhs_parents)
+            && ids_and_kinds(&self.rhs_parents) == ids_and_kinds(&other.rhs_parents)
     }
 }
 impl<'a> Eq for Vertex<'a> {}
 
 impl<'a> Hash for Vertex<'a> {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // TODO: confirm this is correct when LHS and RHS have
+        // different nodes with the same ID.
         self.lhs_syntax.map(|node| node.id()).hash(state);
         self.rhs_syntax.map(|node| node.id()).hash(state);
+        for (node, kind) in &self.lhs_parents {
+            node.id().hash(state);
+            kind.hash(state);
+        }
+        for (node, kind) in &self.rhs_parents {
+            node.id().hash(state);
+            kind.hash(state);
+        }
     }
 }
 
 impl<'a> Vertex<'a> {
     fn is_end(&self) -> bool {
-        self.lhs_syntax.is_none() && self.rhs_syntax.is_none()
+        self.lhs_syntax.is_none()
+            && self.rhs_syntax.is_none()
+            && self.lhs_parents.is_empty()
+            && self.rhs_parents.is_empty()
     }
 }
 
@@ -120,6 +154,19 @@ impl<'a> PartialEq for OrdVertex<'a> {
 }
 impl<'a> Eq for OrdVertex<'a> {}
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+enum PopKind {
+    LHS,
+    RHS,
+    Both,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+enum EnterKind {
+    NovelDelimiter,
+    UnchangedDelimiter,
+}
+
 /// An edge in our graph, with an associated [`cost`](Edge::cost).
 ///
 /// A syntax node can always be marked as novel, so a vertex will have
@@ -129,6 +176,7 @@ impl<'a> Eq for OrdVertex<'a> {}
 /// See [`neighbours`] for all the edges available for a given `Vertex`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 enum Edge {
+    PopList(PopKind),
     UnchangedNode { depth_difference: u64 },
     UnchangedDelimiter { depth_difference: u64 },
     ReplacedComment { levenshtein_pct: u8 },
@@ -143,6 +191,8 @@ enum Edge {
 impl Edge {
     fn cost(&self) -> u64 {
         match self {
+            PopList(_) => 1,
+
             // Matching nodes is always best.
             UnchangedNode { depth_difference } => min(40, *depth_difference),
             // Matching an outer delimiter is good.
@@ -262,12 +312,13 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                 .abs() as u64;
 
             // Both nodes are equal, the happy case.
-            // TODO: this is only OK if we've not changed depth.
             res.push((
                 UnchangedNode { depth_difference },
                 Vertex {
-                    lhs_syntax: lhs_syntax.next(),
-                    rhs_syntax: rhs_syntax.next(),
+                    lhs_parents: v.lhs_parents.clone(),
+                    rhs_parents: v.rhs_parents.clone(),
+                    lhs_syntax: lhs_syntax.next_sibling(),
+                    rhs_syntax: rhs_syntax.next_sibling(),
                     lhs_prev_is_novel: false,
                     rhs_prev_is_novel: false,
                 },
@@ -291,24 +342,23 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
         {
             // The list delimiters are equal, but children may not be.
             if lhs_open_content == rhs_open_content && lhs_close_content == rhs_close_content {
-                let lhs_next = if lhs_children.is_empty() {
-                    lhs_syntax.next()
-                } else {
-                    Some(lhs_children[0])
-                };
-                let rhs_next = if rhs_children.is_empty() {
-                    rhs_syntax.next()
-                } else {
-                    Some(rhs_children[0])
-                };
+                let lhs_next = lhs_children.get(0).copied();
+                let rhs_next = rhs_children.get(0).copied();
 
                 let depth_difference = (lhs_syntax.num_ancestors() as i64
                     - rhs_syntax.num_ancestors() as i64)
                     .abs() as u64;
 
+                let mut lhs_parents = v.lhs_parents.clone();
+                lhs_parents.push((lhs_syntax, EnterKind::UnchangedDelimiter));
+                let mut rhs_parents = v.rhs_parents.clone();
+                rhs_parents.push((rhs_syntax, EnterKind::UnchangedDelimiter));
+
                 res.push((
                     UnchangedDelimiter { depth_difference },
                     Vertex {
+                        lhs_parents,
+                        rhs_parents,
                         lhs_syntax: lhs_next,
                         rhs_syntax: rhs_next,
                         lhs_prev_is_novel: false,
@@ -339,8 +389,10 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                 res.push((
                     ReplacedComment { levenshtein_pct },
                     Vertex {
-                        lhs_syntax: lhs_syntax.next(),
-                        rhs_syntax: rhs_syntax.next(),
+                        lhs_parents: v.lhs_parents.clone(),
+                        rhs_parents: v.rhs_parents.clone(),
+                        lhs_syntax: lhs_syntax.next_sibling(),
+                        rhs_syntax: rhs_syntax.next_sibling(),
                         lhs_prev_is_novel: false,
                         rhs_prev_is_novel: false,
                     },
@@ -358,7 +410,9 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                         contiguous: v.lhs_prev_is_novel && lhs_syntax.prev_is_contiguous(),
                     },
                     Vertex {
-                        lhs_syntax: lhs_syntax.next(),
+                        lhs_parents: v.lhs_parents.clone(),
+                        rhs_parents: v.rhs_parents.clone(),
+                        lhs_syntax: lhs_syntax.next_sibling(),
                         rhs_syntax: v.rhs_syntax,
                         lhs_prev_is_novel: true,
                         rhs_prev_is_novel: v.rhs_prev_is_novel,
@@ -371,17 +425,18 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                 num_descendants,
                 ..
             } => {
-                let lhs_next = if children.is_empty() {
-                    lhs_syntax.next()
-                } else {
-                    Some(children[0])
-                };
+                let lhs_next = children.get(0).copied();
+
+                let mut lhs_parents = v.lhs_parents.clone();
+                lhs_parents.push((lhs_syntax, EnterKind::NovelDelimiter));
 
                 res.push((
                     NovelDelimiterLHS {
                         contiguous: v.lhs_prev_is_novel && lhs_syntax.prev_is_contiguous(),
                     },
                     Vertex {
+                        lhs_parents,
+                        rhs_parents: v.rhs_parents.clone(),
                         lhs_syntax: lhs_next,
                         rhs_syntax: v.rhs_syntax,
                         lhs_prev_is_novel: true,
@@ -395,7 +450,9 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                             num_descendants: *num_descendants as u64,
                         },
                         Vertex {
-                            lhs_syntax: lhs_syntax.next(),
+                            lhs_parents: v.lhs_parents.clone(),
+                            rhs_parents: v.rhs_parents.clone(),
+                            lhs_syntax: lhs_syntax.next_sibling(),
                             rhs_syntax: v.rhs_syntax,
                             lhs_prev_is_novel: v.lhs_prev_is_novel,
                             rhs_prev_is_novel: v.rhs_prev_is_novel,
@@ -415,8 +472,10 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                         contiguous: v.rhs_prev_is_novel && rhs_syntax.prev_is_contiguous(),
                     },
                     Vertex {
+                        lhs_parents: v.lhs_parents.clone(),
+                        rhs_parents: v.rhs_parents.clone(),
                         lhs_syntax: v.lhs_syntax,
-                        rhs_syntax: rhs_syntax.next(),
+                        rhs_syntax: rhs_syntax.next_sibling(),
                         lhs_prev_is_novel: v.lhs_prev_is_novel,
                         rhs_prev_is_novel: true,
                     },
@@ -428,17 +487,18 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                 num_descendants,
                 ..
             } => {
-                let rhs_next = if children.is_empty() {
-                    rhs_syntax.next()
-                } else {
-                    Some(children[0])
-                };
+                let rhs_next = children.get(0).copied();
+
+                let mut rhs_parents = v.rhs_parents.clone();
+                rhs_parents.push((rhs_syntax, EnterKind::NovelDelimiter));
 
                 res.push((
                     NovelDelimiterRHS {
                         contiguous: v.rhs_prev_is_novel && rhs_syntax.prev_is_contiguous(),
                     },
                     Vertex {
+                        lhs_parents: v.lhs_parents.clone(),
+                        rhs_parents,
                         lhs_syntax: v.lhs_syntax,
                         rhs_syntax: rhs_next,
                         lhs_prev_is_novel: v.lhs_prev_is_novel,
@@ -452,8 +512,10 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
                             num_descendants: *num_descendants as u64,
                         },
                         Vertex {
+                            lhs_parents: v.lhs_parents.clone(),
+                            rhs_parents: v.rhs_parents.clone(),
                             lhs_syntax: v.lhs_syntax,
-                            rhs_syntax: rhs_syntax.next(),
+                            rhs_syntax: rhs_syntax.next_sibling(),
                             lhs_prev_is_novel: v.lhs_prev_is_novel,
                             rhs_prev_is_novel: v.rhs_prev_is_novel,
                         },
@@ -463,11 +525,100 @@ fn neighbours<'a>(v: &Vertex<'a>) -> Vec<(Edge, Vertex<'a>)> {
         }
     }
 
+    // If both nodes are None, we've reached the end of the current
+    // list on both sides. Pop out to the parent.
+    //
+    // If we've entered on a single side, it's OK to pop out on
+    // one side. This is essentially what autochrome does.
+    //
+    // Old: x y  New: (x) y -- OK to consider y as unchanged (pop LHS)
+    // Old (x y) New: (x) y -- not OK to consider y as uhcnaged (need to pop both sides.)
+    //
+    // When is an atom novel?
+    //
+    // (a) It's not the next atom in a preorder traversal
+    // (ignoring intermediate atom insertions), or
+    //
+    // (b) it occurs after an UnchangedDelimiter
+    //
+    // So we can always PopList if we're at the end of a level on both
+    // sides.
+    //
+    // We can PopList on a single side if we entered
+    // NovelDelimiterLHS/RHS.
+    if v.lhs_syntax.is_none() && v.rhs_syntax.is_none() {
+        if let (
+            Some((lhs_parent, EnterKind::UnchangedDelimiter)),
+            Some((rhs_parent, EnterKind::UnchangedDelimiter)),
+        ) = (v.lhs_parents.last(), v.rhs_parents.last())
+        {
+            let mut lhs_parents = v.lhs_parents.clone();
+            lhs_parents.pop();
+            let mut rhs_parents = v.rhs_parents.clone();
+            rhs_parents.pop();
+
+            res.push((
+                PopList(PopKind::Both),
+                Vertex {
+                    lhs_parents,
+                    rhs_parents,
+                    lhs_syntax: lhs_parent.next_sibling(),
+                    rhs_syntax: rhs_parent.next_sibling(),
+                    // TODO: set is_novel correctly.
+                    lhs_prev_is_novel: false,
+                    rhs_prev_is_novel: false,
+                },
+            ));
+        }
+    }
+
+    if v.lhs_syntax.is_none() {
+        if let Some((lhs_parent, EnterKind::NovelDelimiter)) = v.lhs_parents.last() {
+            let mut lhs_parents = v.lhs_parents.clone();
+            lhs_parents.pop();
+
+            res.push((
+                PopList(PopKind::LHS),
+                Vertex {
+                    lhs_parents,
+                    rhs_parents: v.rhs_parents.clone(),
+                    lhs_syntax: lhs_parent.next_sibling(),
+                    rhs_syntax: v.rhs_syntax,
+                    // TODO: set is_novel correctly.
+                    lhs_prev_is_novel: false,
+                    rhs_prev_is_novel: false,
+                },
+            ));
+        }
+    }
+
+    if v.rhs_syntax.is_none() {
+        if let Some((rhs_parent, EnterKind::NovelDelimiter)) = v.rhs_parents.last() {
+            let mut rhs_parents = v.rhs_parents.clone();
+            rhs_parents.pop();
+
+            res.push((
+                PopList(PopKind::RHS),
+                Vertex {
+                    lhs_parents: v.lhs_parents.clone(),
+                    rhs_parents,
+                    lhs_syntax: v.lhs_syntax,
+                    rhs_syntax: rhs_parent.next_sibling(),
+                    // TODO: set is_novel correctly.
+                    lhs_prev_is_novel: false,
+                    rhs_prev_is_novel: false,
+                },
+            ));
+        }
+    }
+
     res
 }
 
 pub fn mark_syntax<'a>(lhs_syntax: Option<&'a Syntax<'a>>, rhs_syntax: Option<&'a Syntax<'a>>) {
     let start = Vertex {
+        lhs_parents: vec![],
+        rhs_parents: vec![],
         lhs_syntax,
         rhs_syntax,
         lhs_prev_is_novel: false,
@@ -480,6 +631,7 @@ pub fn mark_syntax<'a>(lhs_syntax: Option<&'a Syntax<'a>>, rhs_syntax: Option<&'
 fn mark_route(route: &[(Edge, Vertex)]) {
     for (e, v) in route {
         match e {
+            PopList(_) => {}
             UnchangedNode { .. } => {
                 // No change on this node or its children.
                 let lhs = v.lhs_syntax.unwrap();
@@ -581,6 +733,8 @@ mod tests {
         });
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: Some(lhs),
             rhs_syntax: Some(rhs),
             lhs_prev_is_novel: false,
@@ -621,6 +775,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -667,6 +823,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -717,6 +875,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -754,6 +914,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -791,6 +953,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -828,6 +992,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -915,6 +1081,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -954,6 +1122,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -984,6 +1154,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
@@ -1017,6 +1189,8 @@ mod tests {
         init_info(&lhs, &rhs);
 
         let start = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
             lhs_syntax: lhs.get(0).copied(),
             rhs_syntax: rhs.get(0).copied(),
             lhs_prev_is_novel: false,
