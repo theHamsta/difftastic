@@ -691,6 +691,121 @@ mod tests {
     use std::cell::Cell;
     use typed_arena::Arena;
 
+    /// An empty vertex (representing the end) should be equal to
+    /// another empty vertex.
+    #[test]
+    fn equal_empty_vertices() {
+        let x = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
+            lhs_syntax: None,
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+        let y = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
+            lhs_syntax: None,
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+        assert_eq!(x, y);
+    }
+
+    /// Vertices pointing to different syntax nodes should not be
+    /// equal.
+    #[test]
+    fn vertices_different_nodes() {
+        let arena = Arena::new();
+
+        let x_atom = arena.alloc(Atom {
+            info: SyntaxInfo {
+                unique_id: Cell::new(0),
+                ..SyntaxInfo::new(0)
+            },
+            position: pos_helper(0),
+            content: "foo".into(),
+            is_comment: false,
+        });
+
+        let y_atom = arena.alloc(Atom {
+            info: SyntaxInfo {
+                unique_id: Cell::new(1),
+                ..SyntaxInfo::new(0)
+            },
+            position: pos_helper(0),
+            content: "bar".into(),
+            is_comment: false,
+        });
+
+        let x = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
+            lhs_syntax: Some(x_atom),
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+        let y = Vertex {
+            lhs_parents: vec![],
+            rhs_parents: vec![],
+            lhs_syntax: Some(y_atom),
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+
+        assert_ne!(x, y);
+    }
+
+    /// Vertices with different parents should not be
+    /// equal.
+    #[test]
+    fn vertices_different_parents() {
+        let arena = Arena::new();
+
+        let x_atom = arena.alloc(Atom {
+            info: SyntaxInfo {
+                unique_id: Cell::new(0),
+                ..SyntaxInfo::new(0)
+            },
+            position: pos_helper(0),
+            content: "foo".into(),
+            is_comment: false,
+        });
+
+        let y_atom = arena.alloc(Atom {
+            info: SyntaxInfo {
+                unique_id: Cell::new(1),
+                ..SyntaxInfo::new(0)
+            },
+            position: pos_helper(0),
+            content: "bar".into(),
+            is_comment: false,
+        });
+
+        let x = Vertex {
+            lhs_parents: vec![(x_atom, EnterKind::NovelDelimiter)],
+            rhs_parents: vec![],
+            lhs_syntax: None,
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+        let y = Vertex {
+            lhs_parents: vec![(y_atom, EnterKind::UnchangedDelimiter)],
+            rhs_parents: vec![],
+            lhs_syntax: None,
+            rhs_syntax: None,
+            lhs_prev_is_novel: false,
+            rhs_prev_is_novel: false,
+        };
+
+        assert_ne!(x, y);
+    }
+
     fn pos_helper(line: usize) -> Vec<SingleLineSpan> {
         vec![SingleLineSpan {
             line: line.into(),
