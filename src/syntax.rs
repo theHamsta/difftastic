@@ -43,7 +43,6 @@ impl<'a> fmt::Debug for ChangeKind<'a> {
 pub struct SyntaxInfo<'a> {
     // TODO: Make these fields private.
     pub pos_content_hash: u64,
-    pub parent: Cell<Option<&'a Syntax<'a>>>,
     pub next_sibling: Cell<Option<&'a Syntax<'a>>>,
     pub prev: Cell<Option<&'a Syntax<'a>>>,
     pub change: Cell<Option<ChangeKind<'a>>>,
@@ -55,7 +54,6 @@ impl<'a> SyntaxInfo<'a> {
     pub fn new(pos_content_hash: u64) -> Self {
         Self {
             pos_content_hash,
-            parent: Cell::new(None),
             next_sibling: Cell::new(None),
             prev: Cell::new(None),
             change: Cell::new(None),
@@ -262,10 +260,6 @@ impl<'a> Syntax<'a> {
         self.info().next_sibling.get()
     }
 
-    pub fn parent(&self) -> Option<&'a Syntax<'a>> {
-        self.info().parent.get()
-    }
-
     pub fn prev_is_contiguous(&self) -> bool {
         if let Some(prev) = self.info().prev.get() {
             match prev {
@@ -463,16 +457,6 @@ fn set_unique_id<'a>(nodes: &[&'a Syntax<'a>], prev_id: u64) -> u64 {
         id += 1;
     }
     id
-}
-
-/// For every syntax node in the tree, mark the parent node.
-fn set_parent<'a>(nodes: &[&'a Syntax<'a>], parent: Option<&'a Syntax<'a>>) {
-    for node in nodes.iter() {
-        node.info().parent.set(parent);
-        if let List { children, .. } = node {
-            set_parent(children, Some(node));
-        }
-    }
 }
 
 /// For every syntax node in the tree, mark the next sibling node.
