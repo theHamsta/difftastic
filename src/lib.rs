@@ -10,6 +10,7 @@
 //! like Criterion, and for contributors to explore the APIs from
 //! docs.rs.
 
+pub mod a_star;
 pub mod dijkstra;
 pub mod files;
 mod graph;
