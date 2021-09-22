@@ -3,7 +3,6 @@
 
 use std::{
     cmp::{Ordering, Reverse},
-    collections::BinaryHeap,
     env,
 };
 
